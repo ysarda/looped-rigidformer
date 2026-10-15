@@ -24,6 +24,7 @@ import logging
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.noise_utils import apply_random_walk_noise_to_batch, apply_independent_noise
 from data.object_scale import ObjectScale, check_object_counts
+from data import packed_vertices
 
 logger = logging.getLogger(__name__)
 
@@ -590,8 +591,10 @@ class MultiObjectDynamics(Dataset):
                 )
         else:
             # Mesh vertex mode: load from obj_i_pos.npy
-            while (frame_dir / f'obj_{idx}_pos.npy').exists():
-                V = cached_load_npy(frame_dir / f'obj_{idx}_pos.npy')  # (Ni, 3)
+            # Packed scenes (pack_vertices.py) read one memmapped file: per-object file opens bound training on Windows.
+            packed = packed_vertices.load_frame(frame_dir)
+            while (idx < len(packed)) if packed is not None else (frame_dir / f'obj_{idx}_pos.npy').exists():
+                V = packed[idx] if packed is not None else cached_load_npy(frame_dir / f'obj_{idx}_pos.npy')  # (Ni, 3)
                 if self._object_scale is not None:
                     V = self._object_scale.apply(frame_dir / f'obj_{idx}_pos.npy', V)
 
@@ -719,7 +722,8 @@ class MultiObjectDynamics(Dataset):
         # as a non-empty (N, 2|3) array. Point cloud mode is already validated inside
         # _load_frame_objects, so it is skipped here.
         expected_num_objs = len(ref_objs)
-        if pc_resolution is None:
+        # pack_vertices.py made these checks once for a packed scene, and re-reading the files here is the cost it removes
+        if pc_resolution is None and not packed_vertices.available(self.data_path / ds_name):
             for t, fdir in enumerate(frame_paths):
                 for i_ref in range(expected_num_objs):
                     npy_path = fdir / f"obj_{i_ref}_pos.npy"

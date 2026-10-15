@@ -56,6 +56,8 @@ have degenerated into anyway.
 | Change | Why |
 |---|---|
 | `src/utils/sdpa_fallback.py`, imported by `src/models/decoder.py` | flash-attn has no Windows wheel and compiling it needs the CUDA toolkit. The fallback routes the decoder's unmasked attention through `F.scaled_dot_product_attention`, which is exact attention; the real package is still used when it is installed. |
+| `pack_vertices.py`, `src/data/packed_vertices.py`, read by `src/data/multi_dataloader.py` | The loader opens ~160 per-object `.npy` files per training sample, ~6.6 ms each when cold on Windows, which left the GPU at ~7% utilisation. Packing each scene into one memory-mapped file (bit-identical values) took a 1/8-size model from 20.6 to 46.9 samples/s. Unpacked scenes load exactly as upstream. |
+| `configs/movi_a_small.yaml` | Single-GPU control at 1/8 the parameters (17.9M), 18 epochs. Not comparable to the released weights. |
 | `pyproject.toml` replaces `requirements.txt` as the installed set | `uv` manages this environment. flash-attn is omitted per the above; `open3d` and `polyscope` are omitted because they are only needed to render rollout videos. |
 
 `UPSTREAM_README.md` is their `README.md`, renamed so this file can take its place.
@@ -76,4 +78,15 @@ hf download frankzydou/RigidFormer rigidformer_movia.pth --local-dir checkpoints
 ```
 
 See [UPSTREAM_README.md](UPSTREAM_README.md) for the dataset download and the training
-layout it writes.
+layout it writes. After materializing a dataset, pack it once (about an hour for MOVi-A,
+bound by the same per-file cost it removes):
+
+```bash
+uv run python pack_vertices.py datasets/MOVi-A
+```
+
+On Windows `torchrun` cannot start, and one GPU needs no launcher:
+
+```bash
+uv run python src/train.py --config configs/movi_a_small.yaml --use_multi_dataset
+```
