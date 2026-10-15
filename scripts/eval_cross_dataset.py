@@ -223,14 +223,20 @@ def run_one(target_key, base_cfg, base_cfg_path, checkpoint, num_gpus, project_d
     env["MASTER_PORT"] = str(int(os.environ.get("MASTER_PORT_BASE", "29500")) + master_port_offset)
 
     nproc = len([x for x in num_gpus.split(",") if x.strip()])
-    # Resolve torchrun next to the current Python interpreter, falling back to PATH.
-    torchrun = os.path.join(os.path.dirname(sys.executable), "torchrun")
-    if not os.path.isfile(torchrun):
-        torchrun = "torchrun"
+    if nproc == 1:
+        # train.py only initialises a process group when WORLD_SIZE > 1, so a single-GPU
+        # run needs no launcher. Skipping torchrun also avoids its rendezvous, which
+        # cannot start on Windows: the elastic backends build a TCPStore without
+        # honouring USE_LIBUV, and the Windows wheels are built without libuv.
+        launcher = [sys.executable]
+    else:
+        # Resolve torchrun next to the current Python interpreter, falling back to PATH.
+        torchrun = os.path.join(os.path.dirname(sys.executable), "torchrun")
+        if not os.path.isfile(torchrun):
+            torchrun = "torchrun"
+        launcher = [torchrun, "--standalone", f"--nproc_per_node={nproc}"]
     cmd = [
-        torchrun,
-        "--standalone",
-        f"--nproc_per_node={nproc}",
+        *launcher,
         "src/train.py",
         "--config",
         str(tmp_cfg_path),

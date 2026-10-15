@@ -5,7 +5,10 @@ Bidirectional Transformer decoder inspired by CUT3R.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from flash_attn import flash_attn_func
+try:
+    from flash_attn import flash_attn_func
+except ImportError:  # no flash-attn wheel on Windows; exact attention via SDPA instead
+    from src.utils.sdpa_fallback import flash_attn_func
 from typing import Optional, Tuple, List
 import math
 import os

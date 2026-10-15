@@ -1051,6 +1051,32 @@ def make_collate_fn(max_objects_per_frame: Optional[int] = None, max_vertices_pe
     return collate_fn
 
 
+class PicklableCollate:
+    """Picklable stand-in for the closure `make_collate_fn` returns.
+
+    Windows starts dataloader workers with spawn rather than fork, so `collate_fn` has
+    to survive pickling, and a local closure does not. This carries only the two plain
+    arguments across the process boundary and rebuilds the closure on first use in the
+    worker, leaving the collate logic itself untouched.
+    """
+
+    def __init__(self, max_objects_per_frame=None, max_vertices_per_object=None):
+        self._args = (max_objects_per_frame, max_vertices_per_object)
+        self._fn = None
+
+    def __call__(self, batch):
+        if self._fn is None:
+            self._fn = make_collate_fn(*self._args)
+        return self._fn(batch)
+
+    def __getstate__(self):
+        return self._args          # the rebuilt closure is never pickled
+
+    def __setstate__(self, state):
+        self._args = state
+        self._fn = None
+
+
 def create_multi_dataloaders(
     data_path: str,
     train_batch_size: int = 32,
@@ -1098,7 +1124,7 @@ def create_multi_dataloaders(
     kwargs['if_phys_param'] = if_phys_param
 
     # Create configured collate function with fixed padding
-    collate_fn = make_collate_fn(
+    collate_fn = PicklableCollate(
         max_objects_per_frame=max_objects_per_frame,
         max_vertices_per_object=max_vertices_per_object
     )

@@ -1,0 +1,36 @@
+[project]
+name = "looped-rigidformer"
+version = "0.1.0"
+description = "Looped-transformer experiments on RigidFormer"
+requires-python = ">=3.10,<3.12"
+
+# Upstream pins these in requirements.txt; the set below matches it except for the three
+# noted in README.md (flash-attn, open3d, polyscope).
+dependencies = [
+    "torch==2.6.0",
+    "numpy==2.2.6",
+    "scipy==1.15.3",
+    "h5py==3.15.1",
+    "einops==0.8.1",
+    "roma==1.5.4",
+    "trimesh==4.9.0",
+    "tensorboard==2.20.0",
+    "matplotlib==3.10.7",
+    "tqdm==4.67.1",
+    "pyyaml==6.0.3",
+    "pyarrow==25.0.0",
+    "huggingface-hub==1.0.1",
+    # hf-hub 1.0.1 ships the `hf` command both READMEs use but does not declare click,
+    # which its CLI imports, and it has no extra that pulls it in
+    "click>=8.1",
+    "pytest==9.0.2",
+]
+
+# torch 2.6.0 from PyPI is the CPU build on Windows; cu124 comes from PyTorch's own index.
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true

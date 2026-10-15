@@ -60,7 +60,9 @@ def check_dataset(ds, cfgs):
             raise ValueError(f'{path}: SHA-256 differs from manifest.json (damaged or altered)')
     for cfg in cfgs:
         listed = {rel for rel in man['files'] if rel.startswith(f'data/{cfg}/')}
-        present = {str(p.relative_to(ds)) for p in (ds / 'data' / cfg).glob('*.parquet')}
+        # as_posix(), not str(): manifest.json lists forward slashes, and str() of a
+        # relative path yields backslashes on Windows, so the sets never compare equal
+        present = {p.relative_to(ds).as_posix() for p in (ds / 'data' / cfg).glob('*.parquet')}
         if listed != present:
             raise ValueError(f'{cfg}: Parquet files differ from manifest.json: missing {sorted(listed - present)}, '
                              f'unlisted {sorted(present - listed)}')
