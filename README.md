@@ -1,66 +1,59 @@
 # looped-rigidformer
 
-Looped-transformer experiments built on RigidFormer, the object-centric transformer for
-mesh-free rigid-body dynamics by Dou et al.
+Looped transformers applied to RigidFormer, a learned simulator for rigid-body dynamics.
 
-Upstream documentation is preserved verbatim in [UPSTREAM_README.md](UPSTREAM_README.md),
-and it remains the reference for the data pipeline, the configs and the training and
-evaluation scripts. This file covers only what differs here.
+## RigidFormer
 
-## Provenance
+[RigidFormer](https://people.csail.mit.edu/frankzydou/projects/RigidFormer/index.html)
+(Dou et al., NeurIPS 2026, [arXiv:2605.09196](https://arxiv.org/abs/2605.09196)) learns
+how rigid objects move, collide and come to rest, directly from point samples of their
+surfaces and without meshes. Each object becomes one token. A transformer reads the
+recent history of every object in the scene and predicts the next state, and the
+prediction is projected back onto a rigid motion so objects can't deform. A rollout
+repeats that step hundreds of times, feeding each prediction back in as input.
 
-**The model, data pipeline, training code and assets are the work of the RigidFormer
-authors, not ours.** Our contribution is only what has been added on top, as recorded
-below.
+## Looped transformers
 
-This repository starts from an unmodified copy of the `RigidFormer/` directory of
+A standard transformer applies a stack of distinct layers once each. A looped
+transformer instead applies one shared block, or a small group of them, many times in a
+row, so depth comes from repetition instead of extra parameters
+([Dehghani et al. 2018](https://arxiv.org/abs/1807.03819),
+[Giannou et al. 2023](https://arxiv.org/abs/2301.13196),
+[Yang et al. 2023](https://arxiv.org/abs/2311.12424)). The number of iterations can
+differ between training and inference, so the model can spend more compute on harder
+inputs. Looped models tend to learn iterative procedures better than fixed-depth ones of
+the same size.
+
+## This repo
+
+Both ideas are about repetition, which is why this repo combines them. Resolving contact
+between rigid bodies is itself an iterative process: physics engines run a constraint
+solver for several passes each step until the objects stop overlapping. A looped
+decoder could learn that refinement as a loop of its own, and spend more iterations on
+the frames where objects collide. The question is whether that improves long rollouts,
+where impacts and settling dominate the error, at equal or smaller parameter count.
+
+Runs are compared by rollout position error over 400 frames on MOVi-A, against a
+1/8-size RigidFormer trained on the same 18-epoch budget as a control.
+
+## Based on
+
+The code started as an unmodified copy of the `RigidFormer/` directory of
 [Frank-ZY-Dou/Dynamics-Modeling](https://github.com/Frank-ZY-Dou/Dynamics-Modeling) at
-commit [`aef87174da8f2eaade385b10b946f0459cdd0ef2`](https://github.com/Frank-ZY-Dou/Dynamics-Modeling/tree/aef87174da8f2eaade385b10b946f0459cdd0ef2/RigidFormer)
-(2026-10-12), the code release accompanying
+[`aef8717`](https://github.com/Frank-ZY-Dou/Dynamics-Modeling/tree/aef87174da8f2eaade385b10b946f0459cdd0ef2/RigidFormer),
+tagged `upstream-aef8717` here, so `git diff upstream-aef8717` shows every change since.
+Their MIT [LICENSE](LICENSE) is kept, and their README is preserved as
+[UPSTREAM_README.md](UPSTREAM_README.md). It remains the reference for the data
+pipeline, configs and scripts.
 
-> **RigidFormer: Learning Rigid Dynamics using Transformers.**
-> Zhiyang Dou, Minghao Guo, Haixu Wu, Doug Roble, Tuur Stuyck, Wojciech Matusik.
-> NeurIPS 2026. [arXiv:2605.09196](https://arxiv.org/abs/2605.09196) ·
-> [project page](https://people.csail.mit.edu/frankzydou/projects/RigidFormer/index.html)
-
-That copy is the first commit and contains nothing of ours. It is tagged
-`upstream-aef8717`, so
-
-```bash
-git diff upstream-aef8717 -- src/        # every change we have made to the model
-git diff upstream-aef8717 --stat         # the whole contribution, at a glance
-```
-
-always answers "what is ours and what is theirs" exactly, with no upstream remote
-required. Their work is MIT licensed and [LICENSE](LICENSE) is retained unchanged.
-
-### Why this is a copy rather than a fork
-
-RigidFormer is one directory inside `Dynamics-Modeling`, a monorepo holding seven
-unrelated projects (HandDiffSim, NeuralActuator, Penetration-Solving and others). It is
-not a submodule and has no repository of its own, and GitHub forks whole repositories,
-so forking would have meant carrying six projects we will never touch in order to track
-one directory we will rewrite heavily.
-
-This repository is a single project with a single focus: one model, one line of
-experiments. Keeping it that way matters more here than an automatic upstream merge.
-The code is a finished release accompanying a published paper, so upstream changes are
-expected to be occasional fixes rather than redesigns, and the `upstream-aef8717` tag
-preserves the one thing a fork would genuinely have bought us, a permanent and exact
-diff of our contribution. Applying a future upstream fix means reading their patch and
-porting it, which for a codebase we are modifying substantially is what a merge would
-have degenerated into anyway.
-
-## Differences from upstream
+## Changes to the RigidFormer code
 
 | Change | Why |
 |---|---|
-| `src/utils/sdpa_fallback.py`, imported by `src/models/decoder.py` | flash-attn has no Windows wheel and compiling it needs the CUDA toolkit. The fallback routes the decoder's unmasked attention through `F.scaled_dot_product_attention`, which is exact attention; the real package is still used when it is installed. |
-| `pack_vertices.py`, `src/data/packed_vertices.py`, read by `src/data/multi_dataloader.py` | The loader opens ~160 per-object `.npy` files per training sample, ~6.6 ms each when cold on Windows, which left the GPU at ~7% utilisation. Packing each scene into one memory-mapped file (bit-identical values) took a 1/8-size model from 20.6 to 46.9 samples/s. Unpacked scenes load exactly as upstream. |
-| `configs/movi_a_small.yaml` | Single-GPU control at 1/8 the parameters (17.9M), 18 epochs. Not comparable to the released weights. |
-| `pyproject.toml` replaces `requirements.txt` as the installed set | `uv` manages this environment. flash-attn is omitted per the above; `open3d` and `polyscope` are omitted because they are only needed to render rollout videos. |
-
-`UPSTREAM_README.md` is their `README.md`, renamed so this file can take its place.
+| `src/utils/sdpa_fallback.py`, imported by `src/models/decoder.py` | flash-attn has no Windows wheel. The fallback computes the same exact attention through `F.scaled_dot_product_attention`. |
+| `pack_vertices.py`, `src/data/packed_vertices.py`, read by `src/data/multi_dataloader.py` | Loading opened ~160 small files per sample, which starved the GPU on Windows. Packing each scene into one memory-mapped file (bit-identical values) more than doubled training throughput. Unpacked scenes load as before. |
+| `configs/movi_a_small.yaml` | The single-GPU control: 1/8 the parameters (17.9M), 18 epochs. Not comparable to the released weights. |
+| `pyproject.toml` replaces `requirements.txt` | `uv` manages the environment. flash-attn, `open3d` and `polyscope` are left out; the last two are only needed to render videos. |
 
 ## Setup
 
@@ -68,21 +61,17 @@ have degenerated into anyway.
 uv sync
 ```
 
-A CUDA GPU is required: the KNN and attention paths have no CPU implementation.
-
-Data and pretrained weights download as upstream documents, into paths their
-`.gitignore` already excludes:
-
-```bash
-hf download frankzydou/RigidFormer rigidformer_movia.pth --local-dir checkpoints
-```
-
-See [UPSTREAM_README.md](UPSTREAM_README.md) for the dataset download and the training
-layout it writes. After materializing a dataset, pack it once (about an hour for MOVi-A,
-bound by the same per-file cost it removes):
+A CUDA GPU is required. Download the dataset as described in
+[UPSTREAM_README.md](UPSTREAM_README.md), then pack it once (about an hour for MOVi-A):
 
 ```bash
 uv run python pack_vertices.py datasets/MOVi-A
+```
+
+The released weights:
+
+```bash
+hf download frankzydou/RigidFormer rigidformer_movia.pth --local-dir checkpoints
 ```
 
 On Windows `torchrun` cannot start, and one GPU needs no launcher:
