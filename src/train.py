@@ -448,7 +448,15 @@ class CUT3RDynamicsModel(nn.Module):
         _block_attn_res_block_size = _block_attn_res_cfg.get('block_size', 4) if isinstance(_block_attn_res_cfg, dict) else 4
         _block_attn_res_final = bool(_block_attn_res_cfg.get('final_aggregate', False)) if isinstance(_block_attn_res_cfg, dict) else False
 
-        self.decoder = BidirectionalDecoder(
+        # model.decoder.loop.enable runs one shared layer T times instead (src/models/looped_decoder.py)
+        _loop_cfg = config['model']['decoder'].get('loop', {}) or {}
+        if _loop_cfg.get('enable', False):
+            from functools import partial
+            from src.models.looped_decoder import LoopedDecoder
+            _decoder_cls = partial(LoopedDecoder, loop=_loop_cfg)
+        else:
+            _decoder_cls = BidirectionalDecoder
+        self.decoder = _decoder_cls(
             state_dim=config['model']['state'].get('token_dim', 768),
             num_layers=config['model']['decoder'].get('num_layers', 12),  # CUT3R uses 12
             num_heads=config['model']['decoder'].get('num_heads', 12),
@@ -527,6 +535,10 @@ class CUT3RDynamicsModel(nn.Module):
             cross_object_kv=config['model']['predictor'].get('cross_object_kv', False),  # Cross-object key-value attention
             no_global_state=config['model'].get('no_global_state', False)  # Removes unused state input channels
         )
+        # a looped decoder supervising several passes returns them stacked along the batch (src/models/looped_decoder.py)
+        if _loop_cfg.get('enable', False) and int(_loop_cfg.get('loss_window', 1)) > 1:
+            from src.models.looped_decoder import pass_stacking_hook
+            self.predictor.register_forward_pre_hook(pass_stacking_hook, with_kwargs=True)
         # model.predictor.rmsnorm_eps: training_dtype -> the predictor's RMSNorm modules keep the eps they have in
         # bf16-autocast training also when evaluated in fp32 (their default eps follows the input dtype; see
         # pin_rmsnorm_eps). Applied here, so every construction of the model computes the configured function.
@@ -1262,9 +1274,9 @@ class CUT3RDynamicsModel(nn.Module):
         # (Verlet, Kabsch, ground handling) below is unchanged. Equal to the step-by-step path up to
         # floating-point rounding and the dropout random stream.
         _tb_accel = None
-        if self.training and self._time_batched_forward and T > 2:
-            if teacher_forcing_ratio < 1.0:
-                raise ValueError("training.time_batched_forward requires teacher_forcing_ratio == 1 (inputs must be ground truth)")
+        # scheduled sampling's teacher-forced epochs keep the batched pass; epochs that feed back predictions take
+        # the step-by-step loop below, which the batched pass equals up to rounding
+        if self.training and self._time_batched_forward and T > 2 and teacher_forcing_ratio >= 1.0:
             Tw = T - 2
             rope_memo_reset()
 
@@ -1290,6 +1302,16 @@ class CUT3RDynamicsModel(nn.Module):
                                       small=self.shared_obj_encoder.subset_small_objects)
                           if self._encoder_packed else None),
                 knn_pk=_knn_pack_fwd)
+            # a looped decoder supervising K passes returns K pass-major copies of the rows; each copy continues
+            # through the physics step as its own copy of the batch (src/models/looped_decoder.py)
+            _K = _acc_s.shape[0] // (Tw * B)
+            if _K > 1:
+                from src.models.looped_decoder import repeat_for_passes
+                _acc_s = _acc_s.view(_K, Tw, B, *_acc_s.shape[1:]).transpose(0, 1).reshape(-1, *_acc_s.shape[1:])
+                obj_pos, vtx_mask, obj_mask, anchor_idx, skip_step_size_batch = repeat_for_passes(
+                    _K, obj_pos, vtx_mask, obj_mask, anchor_idx, skip_step_size_batch)
+                B = _K * B
+                _kabsch_valid_idx_fwd = obj_mask.reshape(-1).nonzero(as_tuple=True)[0]
             _tb_accel = _acc_s.view(Tw, B, *_acc_s.shape[1:])
 
         # Time loop predicts for steps t in [1, T-2] -> next positions x_{t+1}
@@ -2958,6 +2980,10 @@ class Trainer:
             # Forward pass (Mixed Precision)
             with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                 predictions = self.model(batch, teacher_forcing_ratio=teacher_forcing_ratio)
+            # one copy of the batch per supervised pass of a looped decoder (src/models/looped_decoder.py)
+            if 'obj_positions_norm' in predictions and predictions['obj_positions_norm'].shape[0] != batch['obj_positions'].shape[0]:
+                from src.models.looped_decoder import repeat_batch_for_passes
+                batch = repeat_batch_for_passes(batch, predictions)
 
             # Access underlying module when using DDP
             _model_ref = self.model.module if isinstance(self.model, DDP) else self.model
